@@ -1,0 +1,2 @@
+﻿aiogram==3.*
+google-generativeai
