@@ -1,3 +1,4 @@
 aiogram
-google-generativeai
 psycopg2-binary
+google-generativeai
+apscheduler
