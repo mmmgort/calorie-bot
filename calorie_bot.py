@@ -12,7 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 import google.generativeai as genai
 
-# ===================== НАСТРОЙКИ =====================
+# ===================== КОНФИГУРАЦИЯ =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -23,7 +23,7 @@ model = genai.GenerativeModel('gemini-1.5-pro')
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Состояния для анкеты профиля
+# Состояния для анкеты и еды
 class ProfileStates(StatesGroup):
     waiting_for_gender = State()
     waiting_for_age = State()
@@ -35,7 +35,7 @@ class ProfileStates(StatesGroup):
 class MealStates(StatesGroup):
     waiting_for_edit = State()
 
-# ===================== БАЗА ДАННЫХ =====================
+# ===================== РАБОТА С БД =====================
 def init_db():
     conn = psycopg2.connect(DATABASE_URL)
     with conn.cursor() as cur:
@@ -85,19 +85,19 @@ def get_goal_kb():
         [KeyboardButton(text="Похудение"), KeyboardButton(text="Поддержание"), KeyboardButton(text="Набор массы")]
     ], resize_keyboard=True)
 
-# ===================== ЛОГИКА АНКЕТЫ =====================
+# ===================== ЛОГИКА АНКЕТЫ (НАСТРОЙКИ) =====================
 
 @dp.message(F.text == "⚙️ Настройки")
 @dp.message(Command("setup"))
 async def start_setup(message: Message, state: FSMContext):
     await state.set_state(ProfileStates.waiting_for_gender)
-    await message.answer("Давай рассчитаем твою норму. Укажи свой пол:", reply_markup=get_gender_kb())
+    await message.answer("Давай настроим твой профиль для расчета КБЖУ. Укажи свой пол:", reply_markup=get_gender_kb())
 
 @dp.message(ProfileStates.waiting_for_gender)
 async def set_gender(message: Message, state: FSMContext):
     await state.update_data(gender=message.text)
     await state.set_state(ProfileStates.waiting_for_age)
-    await message.answer("Сколько тебе лет?", reply_markup=None)
+    await message.answer("Твой возраст?", reply_markup=None)
 
 @dp.message(ProfileStates.waiting_for_age)
 async def set_age(message: Message, state: FSMContext):
@@ -115,7 +115,7 @@ async def set_height(message: Message, state: FSMContext):
 async def set_weight(message: Message, state: FSMContext):
     await state.update_data(weight=message.text)
     await state.set_state(ProfileStates.waiting_for_activity)
-    await message.answer("Уровень физической активности?", reply_markup=get_activity_kb())
+    await message.answer("Уровень активности?", reply_markup=get_activity_kb())
 
 @dp.message(ProfileStates.waiting_for_activity)
 async def set_activity(message: Message, state: FSMContext):
@@ -127,7 +127,7 @@ async def set_activity(message: Message, state: FSMContext):
 async def finish_setup(message: Message, state: FSMContext):
     u = await state.get_data()
     u['goal'] = message.text
-    msg_wait = await message.answer("🌀 Gemini анализирует данные и считает КБЖУ...", reply_markup=get_main_kb())
+    msg_wait = await message.answer("🌀 Gemini рассчитывает твою норму...", reply_markup=get_main_kb())
     
     prompt = (f"Рассчитай суточную норму КБЖУ. Пол: {u['gender']}, Возраст: {u['age']}, "
               f"Рост: {u['height']}, Вес: {u['weight']}, Активность: {u['activity']}, Цель: {u['goal']}. "
@@ -136,6 +136,11 @@ async def finish_setup(message: Message, state: FSMContext):
     try:
         response = model.generate_content(prompt)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        
+        # Защита от AttributeError (исправлено)
+        if not match:
+            raise ValueError("ИИ прислал текст без JSON. Попробуй еще раз.")
+            
         res = json.loads(match.group(0))
         
         conn = psycopg2.connect(DATABASE_URL)
@@ -149,11 +154,10 @@ async def finish_setup(message: Message, state: FSMContext):
         conn.close()
         
         await msg_wait.edit_text(
-            f"✅ Профиль обновлен!\n\n**Твоя персональная норма:**\n🔥 Калории: {res['cal']} ккал\n"
-            f"🥩 Белки: {res['prot']}г | 🥑 Жиры: {res['fat']}г | 🌾 Углеводы: {res['carb']}г"
+            f"✅ Профиль настроен!\n\n**Твоя норма:**\n🔥 {res['cal']} ккал | 🥩 Б: {res['prot']}г | 🥑 Ж: {res['fat']}г | 🌾 У: {res['carb']}г"
         )
     except Exception as e:
-        await msg_wait.edit_text(f"❌ Ошибка расчета: {e}. Установлены стандартные цели.")
+        await msg_wait.edit_text(f"❌ Ошибка расчета: {e}")
     await state.clear()
 
 # ===================== СТАТИСТИКА И ЗАМЕРЫ =====================
@@ -162,22 +166,18 @@ async def finish_setup(message: Message, state: FSMContext):
 async def show_stats(message: Message):
     conn = psycopg2.connect(DATABASE_URL)
     with conn.cursor() as cur:
-        # Еда за сегодня
-        cur.execute("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM meals WHERE user_id=%s AND date=%s", 
-                    (message.from_user.id, date.today()))
+        cur.execute("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM meals WHERE user_id=%s AND date=%s", (message.from_user.id, date.today()))
         food = cur.fetchone()
         c, p, f, carb = [round(x or 0) for x in food]
-        
-        # Цели и прогресс
         cur.execute("SELECT cal, prot, fat, carb FROM user_settings WHERE user_id=%s", (message.from_user.id,))
         goal = cur.fetchone() or (2500, 160, 70, 280)
         cur.execute("SELECT weight, waist, bench FROM progress WHERE user_id=%s ORDER BY date DESC LIMIT 1", (message.from_user.id,))
         prog = cur.fetchone() or (0, 0, 0)
     conn.close()
     
-    text = (f"📊 **Твой прогресс сегодня:**\n\n"
-            f"🍏 **Питание:**\n🔥 Ккал: {c} / {goal[0]}\n🥩 Б: {p}/{goal[1]}г | 🥑 Ж: {f}/{goal[2]}г | 🌾 У: {carb}/{goal[3]}г\n\n"
-            f"💪 **Замеры:**\n⚖️ Вес: {prog[0]} кг | 📏 Талия: {prog[1]} см\n🏋️ Жим: {prog[2]} кг (цель 100!)")
+    text = (f"📊 **Сегодня:**\n\n🍎 **Еда:**\n🔥 {c} / {goal[0]} ккал\n"
+            f"Б: {p}/{goal[1]}г | Ж: {f}/{goal[2]}г | У: {carb}/{goal[3]}г\n\n"
+            f"💪 **Замеры:**\n⚖️ Вес: {prog[0]} кг | 📏 Талия: {prog[1]} см | 🏋️ Жим: {prog[2]} кг")
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text == "⚖️ Замер (Вес/Жим)")
@@ -193,9 +193,9 @@ async def log_numbers(message: Message):
                     (message.from_user.id, date.today(), float(nums[0]), float(nums[1]), float(nums[2])))
     conn.commit()
     conn.close()
-    await message.answer("✅ Данные замера сохранены!")
+    await message.answer("✅ Замеры сохранены!")
 
-# ===================== ОБРАБОТКА ЕДЫ =====================
+# ===================== АНАЛИЗ ЕДЫ =====================
 
 @dp.message(F.photo | F.text)
 async def handle_meal(message: Message, state: FSMContext):
@@ -215,7 +215,10 @@ async def handle_meal(message: Message, state: FSMContext):
             
         response = model.generate_content(contents)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        if not match: raise ValueError("No JSON")
+        
+        # Защита от AttributeError (исправлено)
+        if not match:
+            return await msg_wait.edit_text("❌ ИИ не смог распознать еду. Попробуй описать её текстом.")
             
         data = json.loads(match.group(0))
         await state.update_data(temp_meal=data)
@@ -225,25 +228,26 @@ async def handle_meal(message: Message, state: FSMContext):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да", callback_data="meal_confirm"),
                 InlineKeyboardButton(text="✏️ Изменить", callback_data="meal_edit"),
-                InlineKeyboardButton(text="🗑 Нет", callback_data="meal_cancel")
+                InlineKeyboardButton(text="🗑 Отмена", callback_data="meal_cancel")
             ]]), parse_mode="Markdown"
         )
-    except:
-        await msg_wait.edit_text("❌ Не удалось распознать. Опиши еду текстом.")
+    except Exception as e:
+        await msg_wait.edit_text(f"❌ Ошибка анализа.")
 
 @dp.callback_query(F.data.startswith("meal_"))
 async def meal_callback(callback: CallbackQuery, state: FSMContext):
     if callback.data == "meal_confirm":
         d = (await state.get_data()).get("temp_meal")
-        conn = psycopg2.connect(DATABASE_URL)
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO meals (user_id, date, meal_text, calories, protein, fat, carbs) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                       (callback.from_user.id, date.today(), d['name'], d['calories'], d['protein'], d['fat'], d['carbs']))
-        conn.commit()
-        conn.close()
-        await callback.message.edit_text(f"✅ Добавлено: {d['name']}")
+        if d:
+            conn = psycopg2.connect(DATABASE_URL)
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO meals (user_id, date, meal_text, calories, protein, fat, carbs) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                           (callback.from_user.id, date.today(), d['name'], d['calories'], d['protein'], d['fat'], d['carbs']))
+            conn.commit()
+            conn.close()
+            await callback.message.edit_text(f"✅ Записано: {d['name']}")
     elif callback.data == "meal_edit":
-        await callback.message.answer("Что поправить? (например: 'там было 2 яйца, а не 1')")
+        await callback.message.answer("Что уточнить? (например: 'тут 300 грамм')")
         await state.set_state(MealStates.waiting_for_edit)
     else:
         await callback.message.edit_text("🗑 Отменено")
@@ -254,19 +258,28 @@ async def edit_meal(message: Message, state: FSMContext):
     old = (await state.get_data()).get("temp_meal")
     msg = await message.answer("🔄 Пересчитываю...")
     try:
-        response = model.generate_content(f"Было: {old}. Уточнение: {message.text}. Дай новый JSON.")
+        response = model.generate_content(f"Было: {old}. Уточнение: {message.text}. Дай новый JSON КБЖУ.")
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        
+        if not match:
+            raise ValueError("No JSON")
+            
         data = json.loads(match.group(0))
         await state.update_data(temp_meal=data)
-        await msg.edit_text(f"🍴 **{data['name']}**\n🔥 {data['calories']} ккал | Б: {data['protein']} | Ж: {data['fat']} | У: {data['carbs']}",
+        await msg.edit_text(f"🍴 **{data['name']}**\n🔥 {data['calories']} ккал | Б: {data['protein']}г",
                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                                InlineKeyboardButton(text="✅ ОК", callback_data="meal_confirm"),
                                InlineKeyboardButton(text="🗑 Отмена", callback_data="meal_cancel")
                            ]]))
     except:
-        await msg.edit_text("❌ Ошибка. Попробуй еще раз.")
+        await msg.edit_text("❌ Не удалось пересчитать.")
 
 # ===================== ЗАПУСК =====================
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    init_db()
+    await message.answer("💪 Бот-тренер запущен! Нажми 'Настройки', чтобы задать свои цели.", reply_markup=get_main_kb())
+
 async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
