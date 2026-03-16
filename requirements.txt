@@ -1,2 +1,3 @@
-﻿aiogram==3.*
+aiogram
 google-generativeai
+psycopg2-binary
