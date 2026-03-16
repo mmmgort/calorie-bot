@@ -21,35 +21,49 @@ model = genai.GenerativeModel('gemini-1.5-flash')
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# ===================== БАЗА ДАННЫХ =====================
+# ===================== УМНАЯ ИНИЦИАЛИЗАЦИЯ БД =====================
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        # Таблица настроек
-        cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings 
-                          (user_id BIGINT PRIMARY KEY, cal INT DEFAULT 2600, prot INT DEFAULT 170, 
-                           fat INT DEFAULT 75, carb INT DEFAULT 300, 
-                           target_waist REAL DEFAULT 87.0, last_bench REAL DEFAULT 0.0)''')
-        # Таблица еды
+        
+        # 1. Создаем базовые таблицы, если их нет
+        cursor.execute('''CREATE TABLE IF NOT EXISTS user_settings (user_id BIGINT PRIMARY KEY)''')
         cursor.execute('''CREATE TABLE IF NOT EXISTS meals 
                           (id SERIAL PRIMARY KEY, user_id BIGINT, date DATE, meal_text TEXT, 
                            calories REAL, protein REAL, fat REAL, carbs REAL)''')
-        # Таблица прогресса
         cursor.execute('''CREATE TABLE IF NOT EXISTS progress 
-                          (id SERIAL PRIMARY KEY, user_id BIGINT, date DATE, weight REAL, waist REAL, bench REAL DEFAULT 0.0)''')
+                          (id SERIAL PRIMARY KEY, user_id BIGINT, date DATE, weight REAL, waist REAL)''')
+
+        # 2. ПРОВЕРКА И ДОБАВЛЕНИЕ НЕДОСТАЮЩИХ КОЛОНОК (Миграция)
         
-        # Проверка и добавление колонки bench, если таблица уже была создана без неё
+        # Колонки для user_settings
+        columns_settings = {
+            "cal": "INT DEFAULT 2600",
+            "prot": "INT DEFAULT 170",
+            "fat": "INT DEFAULT 75",
+            "carb": "INT DEFAULT 300",
+            "target_waist": "REAL DEFAULT 87.0",
+            "last_bench": "REAL DEFAULT 0.0"
+        }
+        for col, dtype in columns_settings.items():
+            cursor.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='user_settings' AND column_name='{col}'")
+            if not cursor.fetchone():
+                cursor.execute(f"ALTER TABLE user_settings ADD COLUMN {col} {dtype}")
+                print(f"Добавлена колонка {col} в user_settings")
+
+        # Колонки для progress
         cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name='progress' AND column_name='bench'")
         if not cursor.fetchone():
             cursor.execute("ALTER TABLE progress ADD COLUMN bench REAL DEFAULT 0.0")
-            print("Колонка 'bench' успешно добавлена в таблицу 'progress'.")
-            
+            print("Добавлена колонка bench в progress")
+
         conn.commit()
         cursor.close()
         conn.close()
+        print("База данных успешно синхронизирована.")
     except Exception as e:
-        print(f"ОШИБКА ИНИЦИАЛИЗАЦИИ БД: {e}")
+        print(f"КРИТИЧЕСКАЯ ОШИБКА БД: {e}")
 
 def get_config(user_id):
     conn = psycopg2.connect(DATABASE_URL)
@@ -59,7 +73,7 @@ def get_config(user_id):
     if not row:
         cursor.execute("INSERT INTO user_settings (user_id) VALUES (%s)", (user_id,))
         conn.commit()
-        row = (2600, 170, 75, 300, 87.0, 0.0)
+        return (2600, 170, 75, 300, 87.0, 0.0)
     cursor.close()
     conn.close()
     return row
@@ -68,15 +82,15 @@ def get_config(user_id):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    init_db()
+    init_db() # Запускаем починку базы при старте
     kb = ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💪 Мой Жим")],
         [KeyboardButton(text="⚙️ Настройки")]
     ], resize_keyboard=True)
     await message.answer(
         f"👋 Привет, {message.from_user.first_name}!\n"
-        f"Я все так же считаю твою еду и ничего не забываю. Твои данные в безопасности в базе данных PostgreSQL.\n\n"
-        f"📈 Замеры: `/log Вес Талия Жим`", 
+        "Система обновлена. Теперь база данных готова принимать твои рекорды.\n\n"
+        "📈 Замеры: `/log Вес Талия Жим`", 
         reply_markup=kb
     )
 
@@ -91,22 +105,33 @@ async def log_data(message: Message):
         uid = message.from_user.id
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO progress (user_id, date, weight, waist, bench) VALUES (%s,%s,%s,%s,%s)", (uid, date.today(), w, t, b))
+        
+        # Сохраняем в историю прогресса
+        cursor.execute("INSERT INTO progress (user_id, date, weight, waist, bench) VALUES (%s,%s,%s,%s,%s)", 
+                       (uid, date.today(), w, t, b))
+        
+        # Обновляем текущий жим в настройках
         cursor.execute("UPDATE user_settings SET last_bench=%s WHERE user_id=%s", (b, uid))
+        
         conn.commit()
         cursor.close()
         conn.close()
-        await message.answer(f"✅ Данные приняты!\n⚖️ Вес: {w}кг | 📏 Талия: {t}см | 💪 Жим: {b}кг")
+        await message.answer(f"✅ **Данные записаны!**\n⚖️ Вес: {w}кг | 📏 Талия: {t}см | 💪 Жим: {b}кг\n\nИдем к сотке! 🔥")
     except Exception as e:
-        print(f"ОШИБКА СОХРАНЕНИЯ ЗАМЕРА: {e}")
-        await message.answer(f"❌ Ошибка записи. Проверь логи Railway.")
+        print(f"ОШИБКА LOG: {e}")
+        await message.answer("❌ Ошибка записи. База данных обновляется, попробуй через минуту.")
+
+@dp.message(F.text == "💪 Мой Жим")
+async def show_bench(message: Message):
+    conf = get_config(message.from_user.id)
+    await message.answer(f"🏋️‍♂️ Твой максимум: **{conf[5]} кг**\n🏁 Цель: 100 кг (осталось {max(0, 100-conf[5])} кг)")
 
 @dp.message(F.photo | F.text)
 async def handle_meal(message: Message):
     if message.text and message.text.startswith('/'): return
     uid = message.from_user.id
     conf = get_config(uid)
-    msg_wait = await message.answer("🔍 Считаю...")
+    msg_wait = await message.answer("🔍 Анализирую...")
     
     contents = []
     if message.photo:
@@ -132,12 +157,12 @@ async def handle_meal(message: Message):
         conn.close()
         await msg_wait.edit_text(f"✅ **{data.get('name')}**\n🔥 {res['calories']:.0f} ккал\n💡 {data.get('comment')}")
     except Exception as e:
-        print(f"ОШИБКА Gemini/DB: {e}")
-        await msg_wait.edit_text("❌ Опиши еду текстом подробнее.")
+        print(f"ОШИБКА MEAL: {e}")
+        await msg_wait.edit_text("❌ Не удалось разобрать. Опиши еду текстом.")
 
 async def main():
     init_db()
-    # КРИТИЧЕСКИ ВАЖНО: сбрасываем старые соединения
+    # Сброс очереди, чтобы не было конфликтов (ConflictError)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
