@@ -143,6 +143,48 @@ async def finish_setup(message: Message, state: FSMContext):
         await msg_wait.edit_text(f"❌ Ошибка ИИ. Проверь логи Railway.")
     await state.clear()
 
+# ===================== СТАТИСТИКА =====================
+
+@dp.message(F.text == "📊 Статистика")
+async def show_stats(message: Message):
+    conn = psycopg2.connect(DATABASE_URL)
+    with conn.cursor() as cur:
+        # 1. Получаем целевые нормы пользователя из user_settings
+        cur.execute("SELECT cal, prot, fat, carb FROM user_settings WHERE user_id = %s", (message.from_user.id,))
+        goal = cur.fetchone()
+        
+        # 2. Суммируем всё, что пользователь съел за СЕГОДНЯ
+        cur.execute("""
+            SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) 
+            FROM meals WHERE user_id = %s AND date = %s
+        """, (message.from_user.id, date.today()))
+        eaten = cur.fetchone()
+    conn.close()
+
+    # Если пользователь еще не прошел настройку
+    if not goal:
+        await message.answer("Сначала нажмите '⚙️ Настройки', чтобы я рассчитал ваши нормы!")
+        return
+
+    # Подготавливаем цифры (заменяем None на 0, если еще ничего не съедено)
+    c_now = int(eaten[0] or 0)
+    p_now = int(eaten[1] or 0)
+    f_now = int(eaten[2] or 0)
+    ch_now = int(eaten[3] or 0)
+    
+    # Считаем остаток
+    rem_cal = max(0, goal[0] - c_now)
+
+    await message.answer(
+        f"📅 *Отчет за сегодня ({date.today()}):*\n\n"
+        f"🔥 *Калории:* {c_now} / {goal[0]} ккал\n"
+        f"🍗 *Белки:* {p_now} / {goal[1]}г\n"
+        f"🥑 *Жиры:* {f_now} / {goal[2]}г\n"
+        f"🍞 *Углеводы:* {ch_now} / {goal[3]}г\n\n"
+        f"💡 *Осталось съесть:* {rem_cal} ккал",
+        parse_mode="Markdown"
+    )
+
 # ===================== ЛОГИКА ЕДЫ =====================
 
 @dp.message(F.text)
