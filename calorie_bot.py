@@ -23,10 +23,11 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# СИСТЕМНАЯ ИНСТРУКЦИЯ
+# СИСТЕМНАЯ ИНСТРУКЦИЯ (Для версии 2.0)
 SYSTEM_INSTRUCTION = (
-    "Ты — эксперт-нутрициолог. Анализируй фото или текст. "
-    "Ответ СТРОГО в JSON на русском: "
+    "Ты — профессиональный нутрициолог. Анализируй фото или текст. "
+    "Твоя задача — выдать точный КБЖУ. Оценивай порции по столовым приборам на фото. "
+    "Ответ СТРОГО в формате JSON на русском языке: "
     "{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"название\", \"verdict\": \"совет\"}"
 )
 
@@ -81,7 +82,7 @@ def get_cancel_kb():
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     init_db()
-    await message.answer("💪 Бот готов! Нажми **'Настройки'**.", 
+    await message.answer("🦾 AI-тренер на базе Gemini 2.0 готов. Нажми **'Настройки'** для калибровки.", 
                          reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.text == "❌ Отмена")
@@ -116,7 +117,7 @@ async def process_height(message: Message, state: FSMContext):
 async def process_weight(message: Message, state: FSMContext):
     await state.update_data(weight=message.text)
     await state.set_state(ProfileStates.activity)
-    await message.answer("Активность (Низкая/Средняя/Высокая)?", reply_markup=get_cancel_kb())
+    await message.answer("Уровень активности (Низкий/Средний/Высокий)?", reply_markup=get_cancel_kb())
 
 @dp.message(ProfileStates.activity)
 async def process_activity(message: Message, state: FSMContext):
@@ -128,15 +129,18 @@ async def process_activity(message: Message, state: FSMContext):
 async def process_goal(message: Message, state: FSMContext):
     await state.update_data(goal=message.text)
     data = await state.get_data()
-    msg_wait = await message.answer("🔄 Считаю...")
+    msg_wait = await message.answer("⚡ Gemini 2.0 рассчитывает нормы...")
     
     try:
-        prompt = f"Рассчитай КБЖУ: пол {data['gender']}, возраст {data['age']}, рост {data['height']}, вес {data['weight']}, активность {data['activity']}, цель {data['goal']}."
+        prompt = (f"Рассчитай суточную норму КБЖУ: пол {data['gender']}, возраст {data['age']}, "
+                  f"рост {data['height']}, вес {data['weight']}, цель {data['goal']}.")
+        
         response = client.models.generate_content(
-            model='gemini-1.5-flash', # Используем 1.5 для больших лимитов
+            model='gemini-2.0-flash',
             contents=prompt,
-            config=types.GenerateContentConfig(system_instruction="Return ONLY JSON.")
+            config=types.GenerateContentConfig(system_instruction="Выдай строго JSON: calories, protein, fat, carbs")
         )
+        
         result = json.loads(re.search(r'\{.*\}', response.text, re.DOTALL).group(0))
         
         conn = psycopg2.connect(DATABASE_URL)
@@ -150,21 +154,22 @@ async def process_goal(message: Message, state: FSMContext):
 
         await state.clear()
         await msg_wait.delete()
-        await message.answer(f"✅ Готово! Норма: {result['calories']} ккал.", reply_markup=main_keyboard())
+        await message.answer(f"✅ Нормы установлены! Цель: {result['calories']} ккал.", reply_markup=main_keyboard())
     except Exception as e:
         if "429" in str(e):
-            await message.answer("⏳ Лимит запросов ИИ исчерпан. Подожди 1 минуту.")
+            await message.answer("⏳ Лимит запросов ИИ. Подожди 30 секунд и попробуй снова.")
         else:
-            await message.answer(f" Ошибка: {e}")
+            await message.answer(f"❌ Ошибка: {e}")
 
-# ===================== АНАЛИЗ ЕДЫ =====================
+# ===================== АНАЛИЗ ЕДЫ (Gemini 2.0 Flash) =====================
 
 @dp.message(F.photo | F.text)
 async def handle_meal(message: Message, state: FSMContext):
+    # Игнорируем команды и кнопки меню
     if message.text in ["📊 Статистика", "⚙️ Настройки", "⚖️ Замер (Вес/Жим)"] or (message.text and message.text.startswith('/')):
         return
 
-    msg_wait = await message.answer("🔍 Анализ...")
+    msg_wait = await message.answer("🔍 Анализ через Gemini 2.0...")
     
     try:
         content_parts = []
@@ -173,24 +178,28 @@ async def handle_meal(message: Message, state: FSMContext):
             file = await bot.get_file(file_id)
             buffer = BytesIO()
             await bot.download_file(file.file_path, buffer)
+            
             content_parts.append(types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg"))
-            content_parts.append(f"Еда. Описание: {message.caption or 'нет'}")
+            content_parts.append(f"Проанализируй фото. Комментарий: {message.caption or 'нет'}")
         else:
-            content_parts.append(f"Еда: {message.text}")
+            content_parts.append(f"Проанализируй: {message.text}")
 
         response = client.models.generate_content(
-            model='gemini-1.5-flash', 
+            model='gemini-2.0-flash',
             contents=content_parts,
             config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, temperature=0.1)
         )
         
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        if not match:
+            raise ValueError("ИИ не прислал JSON")
+
         data = json.loads(match.group(0))
         await state.update_data(temp_meal=data)
         
         await msg_wait.delete()
         await message.answer(
-            f"🍴 *{data['name']}*\n🔥 {data['calories']} ккал | Б:{data['protein']}г\n\nЗаписать?",
+            f"🍴 *{data['name']}*\n🔥 {data['calories']} ккал | Б:{data['protein']} Ж:{data['fat']} У:{data['carbs']}\n\nЗаписать?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да", callback_data="meal_confirm"),
                 InlineKeyboardButton(text="🗑 Нет", callback_data="meal_cancel")
@@ -198,9 +207,10 @@ async def handle_meal(message: Message, state: FSMContext):
         )
     except Exception as e:
         if "429" in str(e):
-            await msg_wait.edit_text("⏳ Подожди немного, ИИ отдыхает (лимит запросов).")
+            await msg_wait.edit_text("⏳ Слишком много запросов. Подожди 30 сек.")
         else:
-            await msg_wait.edit_text("❌ Опиши еду текстом.")
+            print(f"Ошибка: {e}")
+            await msg_wait.edit_text("❌ Не удалось распознать. Опиши еду текстом.")
 
 @dp.callback_query(F.data.startswith("meal_"))
 async def meal_callback(callback: CallbackQuery, state: FSMContext):
@@ -221,25 +231,29 @@ async def meal_callback(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: Message):
-    conn = psycopg2.connect(DATABASE_URL)
-    with conn.cursor() as cur:
-        cur.execute("SELECT cal, prot, fat, carb FROM user_settings WHERE user_id = %s", (message.from_user.id,))
-        goal = cur.fetchone()
-        cur.execute("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM meals WHERE user_id = %s AND date = %s", 
-                   (message.from_user.id, date.today()))
-        eaten = cur.fetchone()
-    conn.close()
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute("SELECT cal, prot, fat, carb FROM user_settings WHERE user_id = %s", (message.from_user.id,))
+            goal = cur.fetchone()
+            cur.execute("SELECT SUM(calories), SUM(protein), SUM(fat), SUM(carbs) FROM meals WHERE user_id = %s AND date = %s", 
+                       (message.from_user.id, date.today()))
+            eaten = cur.fetchone()
+        conn.close()
 
-    if not goal:
-        await message.answer("Сначала настрой профиль!")
-        return
+        if not goal:
+            await message.answer("Сначала пройди '⚙️ Настройки'!")
+            return
 
-    c, p, f, cr = [int(x or 0) for x in eaten]
-    await message.answer(
-        f"📅 *Сегодня ({date.today()}):*\n\n"
-        f"🔥 Калории: {c} / {goal[0]}\n🍗 Белки: {p}/{goal[1]}г\n🥑 Жиры: {f}/{goal[2]}г\n🍞 Углеводы: {cr}/{goal[3]}г",
-        parse_mode="Markdown"
-    )
+        c, p, f, cr = [int(x or 0) for x in eaten]
+        await message.answer(
+            f"📅 *Сегодня ({date.today()}):*\n\n"
+            f"🔥 Калории: {c} / {goal[0]}\n"
+            f"🍗 Белки: {p}/{goal[1]}г | 🥑 Жиры: {f}/{goal[2]}г | 🍞 Углеводы: {cr}/{goal[3]}г",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await message.answer("Ошибка при получении статистики.")
 
 async def main():
     init_db()
@@ -248,4 +262,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
