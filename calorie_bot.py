@@ -23,7 +23,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# СИСТЕМНАЯ ИНСТРУКЦИЯ (Для версии 2.0)
+# СИСТЕМНАЯ ИНСТРУКЦИЯ (Для Gemini 2.5 Flash)
 SYSTEM_INSTRUCTION = (
     "Ты — профессиональный нутрициолог. Анализируй фото или текст. "
     "Твоя задача — выдать точный КБЖУ. Оценивай порции по столовым приборам на фото. "
@@ -82,7 +82,7 @@ def get_cancel_kb():
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     init_db()
-    await message.answer("🦾 AI-тренер на базе Gemini 2.0 готов. Нажми **'Настройки'** для калибровки.", 
+    await message.answer("🦾 AI-тренер на базе Gemini 2.5 готов. Нажми **'Настройки'** для калибровки.", 
                          reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.text == "❌ Отмена")
@@ -129,14 +129,15 @@ async def process_activity(message: Message, state: FSMContext):
 async def process_goal(message: Message, state: FSMContext):
     await state.update_data(goal=message.text)
     data = await state.get_data()
-    msg_wait = await message.answer("⚡ Gemini 2.0 рассчитывает нормы...")
+    msg_wait = await message.answer("⚡ Gemini 2.5 рассчитывает нормы...")
     
     try:
         prompt = (f"Рассчитай суточную норму КБЖУ: пол {data['gender']}, возраст {data['age']}, "
                   f"рост {data['height']}, вес {data['weight']}, цель {data['goal']}.")
         
+        # ВОЗВРАЩАЕМ GEMINI 2.5 FLASH!
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(system_instruction="Выдай строго JSON: calories, protein, fat, carbs")
         )
@@ -161,15 +162,14 @@ async def process_goal(message: Message, state: FSMContext):
         else:
             await message.answer(f"❌ Ошибка: {e}")
 
-# ===================== АНАЛИЗ ЕДЫ (Gemini 2.0 Flash) =====================
+# ===================== АНАЛИЗ ЕДЫ (Gemini 2.5 Flash) =====================
 
 @dp.message(F.photo | F.text)
 async def handle_meal(message: Message, state: FSMContext):
-    # Игнорируем команды и кнопки меню
     if message.text in ["📊 Статистика", "⚙️ Настройки", "⚖️ Замер (Вес/Жим)"] or (message.text and message.text.startswith('/')):
         return
 
-    msg_wait = await message.answer("🔍 Анализ через Gemini 2.0...")
+    msg_wait = await message.answer("🔍 Анализ через Gemini 2.5...")
     
     try:
         content_parts = []
@@ -184,8 +184,9 @@ async def handle_meal(message: Message, state: FSMContext):
         else:
             content_parts.append(f"Проанализируй: {message.text}")
 
+        # ВОЗВРАЩАЕМ GEMINI 2.5 FLASH!
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=content_parts,
             config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, temperature=0.1)
         )
@@ -262,3 +263,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
