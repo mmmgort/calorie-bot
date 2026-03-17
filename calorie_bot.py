@@ -5,12 +5,16 @@ import re
 import psycopg2
 from datetime import datetime, date
 from io import BytesIO
+from contextlib import suppress
+
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
+
 from google import genai
 from google.genai import types
 
@@ -23,7 +27,6 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# СИСТЕМНАЯ ИНСТРУКЦИЯ (Для Gemini 2.5 Flash)
 SYSTEM_INSTRUCTION = (
     "Ты — профессиональный нутрициолог. Анализируй фото или текст. "
     "Твоя задача — выдать точный КБЖУ. Оценивай порции по столовым приборам на фото. "
@@ -39,7 +42,20 @@ class ProfileStates(StatesGroup):
     activity = State()
     goal = State()
 
-# ===================== БАЗА ДАННЫХ =====================
+# ===================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =====================
+async def safe_delete(message: Message):
+    """Безопасное удаление сообщения (игнорирует ошибки, если сообщение уже удалено)"""
+    with suppress(TelegramBadRequest):
+        await message.delete()
+
+async def delete_previous_bot_message(chat_id: int, state: FSMContext):
+    """Удаляет предыдущий вопрос бота из анкеты"""
+    data = await state.get_data()
+    bot_msg_id = data.get("bot_msg_id")
+    if bot_msg_id:
+        with suppress(TelegramBadRequest):
+            await bot.delete_message(chat_id, bot_msg_id)
+
 def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -82,51 +98,79 @@ def get_cancel_kb():
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     init_db()
-    await message.answer("🦾 AI-тренер на базе Gemini 2.5 готов. Нажми **'Настройки'** для калибровки.", 
+    await safe_delete(message)
+    await message.answer("🦾 AI-тренер готов. Нажми **'Настройки'** для калибровки.", 
                          reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.text == "❌ Отмена")
 async def cancel_handler(message: Message, state: FSMContext):
+    await safe_delete(message)
+    await delete_previous_bot_message(message.chat.id, state)
     await state.clear()
-    await message.answer("Отменено.", reply_markup=main_keyboard())
+    await message.answer("Действие отменено.", reply_markup=main_keyboard())
 
 @dp.message(F.text == "⚙️ Настройки")
 async def start_settings(message: Message, state: FSMContext):
+    await safe_delete(message) # Удаляем сообщение пользователя "Настройки"
     await state.set_state(ProfileStates.gender)
-    await message.answer("Твой пол (М/Ж)?", reply_markup=get_cancel_kb())
+    msg = await message.answer("Твой пол (М/Ж)?", reply_markup=get_cancel_kb())
+    await state.update_data(bot_msg_id=msg.message_id)
 
 @dp.message(ProfileStates.gender)
 async def process_gender(message: Message, state: FSMContext):
+    await safe_delete(message) # Удаляем ответ пользователя ("М" или "Ж")
+    await delete_previous_bot_message(message.chat.id, state)
+    
     await state.update_data(gender=message.text)
     await state.set_state(ProfileStates.age)
-    await message.answer("Сколько тебе лет?", reply_markup=get_cancel_kb())
+    msg = await message.answer("Сколько тебе лет?", reply_markup=get_cancel_kb())
+    await state.update_data(bot_msg_id=msg.message_id)
 
 @dp.message(ProfileStates.age)
 async def process_age(message: Message, state: FSMContext):
+    await safe_delete(message)
+    await delete_previous_bot_message(message.chat.id, state)
+    
     await state.update_data(age=message.text)
     await state.set_state(ProfileStates.height)
-    await message.answer("Твой рост (см)?", reply_markup=get_cancel_kb())
+    msg = await message.answer("Твой рост (см)?", reply_markup=get_cancel_kb())
+    await state.update_data(bot_msg_id=msg.message_id)
 
 @dp.message(ProfileStates.height)
 async def process_height(message: Message, state: FSMContext):
+    await safe_delete(message)
+    await delete_previous_bot_message(message.chat.id, state)
+    
     await state.update_data(height=message.text)
     await state.set_state(ProfileStates.weight)
-    await message.answer("Твой вес (кг)?", reply_markup=get_cancel_kb())
+    msg = await message.answer("Твой вес (кг)?", reply_markup=get_cancel_kb())
+    await state.update_data(bot_msg_id=msg.message_id)
 
 @dp.message(ProfileStates.weight)
 async def process_weight(message: Message, state: FSMContext):
+    await safe_delete(message)
+    await delete_previous_bot_message(message.chat.id, state)
+    
     await state.update_data(weight=message.text)
     await state.set_state(ProfileStates.activity)
-    await message.answer("Уровень активности (Низкий/Средний/Высокий)?", reply_markup=get_cancel_kb())
+    msg = await message.answer("Уровень активности (Низкий/Средний/Высокий)?", reply_markup=get_cancel_kb())
+    await state.update_data(bot_msg_id=msg.message_id)
 
 @dp.message(ProfileStates.activity)
 async def process_activity(message: Message, state: FSMContext):
+    await safe_delete(message)
+    await delete_previous_bot_message(message.chat.id, state)
+    
     await state.update_data(activity=message.text)
     await state.set_state(ProfileStates.goal)
-    await message.answer("Твоя цель (Похудение/Набор/Поддержание)?", reply_markup=get_cancel_kb())
+    msg = await message.answer("Твоя цель (Похудение/Набор/Поддержание)?", reply_markup=get_cancel_kb())
+    await state.update_data(bot_msg_id=msg.message_id)
 
 @dp.message(ProfileStates.goal)
 async def process_goal(message: Message, state: FSMContext):
+    await safe_delete(message)
+    await delete_previous_bot_message(message.chat.id, state)
+    
     await state.update_data(goal=message.text)
     data = await state.get_data()
     msg_wait = await message.answer("⚡ Gemini 2.5 рассчитывает нормы...")
@@ -135,7 +179,6 @@ async def process_goal(message: Message, state: FSMContext):
         prompt = (f"Рассчитай суточную норму КБЖУ: пол {data['gender']}, возраст {data['age']}, "
                   f"рост {data['height']}, вес {data['weight']}, цель {data['goal']}.")
         
-        # ВОЗВРАЩАЕМ GEMINI 2.5 FLASH!
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
@@ -154,22 +197,25 @@ async def process_goal(message: Message, state: FSMContext):
         conn.close()
 
         await state.clear()
-        await msg_wait.delete()
-        await message.answer(f"✅ Нормы установлены! Цель: {result['calories']} ккал.", reply_markup=main_keyboard())
+        await msg_wait.edit_text(f"✅ Нормы установлены! Цель: {result['calories']} ккал.")
+        # Возвращаем главную клавиатуру отдельным сообщением, так как edit_text не поддерживает ReplyKeyboard
+        await message.answer("Меню активировано:", reply_markup=main_keyboard())
     except Exception as e:
         if "429" in str(e):
-            await message.answer("⏳ Лимит запросов ИИ. Подожди 30 секунд и попробуй снова.")
+            await msg_wait.edit_text("⏳ Лимит запросов ИИ. Подожди 30 секунд и попробуй снова.")
         else:
-            await message.answer(f"❌ Ошибка: {e}")
+            await msg_wait.edit_text(f"❌ Ошибка: {e}")
+        await message.answer("Возврат в меню:", reply_markup=main_keyboard())
+        await state.clear()
 
-# ===================== АНАЛИЗ ЕДЫ (Gemini 2.5 Flash) =====================
+# ===================== АНАЛИЗ ЕДЫ =====================
 
 @dp.message(F.photo | F.text)
 async def handle_meal(message: Message, state: FSMContext):
     if message.text in ["📊 Статистика", "⚙️ Настройки", "⚖️ Замер (Вес/Жим)"] or (message.text and message.text.startswith('/')):
         return
 
-    msg_wait = await message.answer("🔍 Анализ через Gemini 2.5...")
+    msg_wait = await message.answer("🔍 Распознаю...")
     
     try:
         content_parts = []
@@ -184,7 +230,6 @@ async def handle_meal(message: Message, state: FSMContext):
         else:
             content_parts.append(f"Проанализируй: {message.text}")
 
-        # ВОЗВРАЩАЕМ GEMINI 2.5 FLASH!
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=content_parts,
@@ -198,8 +243,11 @@ async def handle_meal(message: Message, state: FSMContext):
         data = json.loads(match.group(0))
         await state.update_data(temp_meal=data)
         
-        await msg_wait.delete()
-        await message.answer(
+        # УДАЛЯЕМ ФОТО ПОЛЬЗОВАТЕЛЯ для чистоты чата
+        await safe_delete(message)
+        
+        # Заменяем "Распознаю..." на результат
+        await msg_wait.edit_text(
             f"🍴 *{data['name']}*\n🔥 {data['calories']} ккал | Б:{data['protein']} Ж:{data['fat']} У:{data['carbs']}\n\nЗаписать?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да", callback_data="meal_confirm"),
@@ -225,13 +273,17 @@ async def meal_callback(callback: CallbackQuery, state: FSMContext):
                            (callback.from_user.id, date.today(), d['name'], d['calories'], d['protein'], d['fat'], d['carbs']))
             conn.commit()
             conn.close()
-            await callback.message.edit_text(f"✅ Записано: {d['name']}")
+            # Обновляем карточку
+            await callback.message.edit_text(f"✅ Съедено: {d['name']} ({d['calories']} ккал)")
     else:
-        await callback.message.edit_text("🗑 Отменено")
+        # Убираем карточку при отмене
+        await safe_delete(callback.message)
     await state.clear()
 
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: Message):
+    await safe_delete(message) # Удаляем сообщение "Статистика"
+    
     try:
         conn = psycopg2.connect(DATABASE_URL)
         with conn.cursor() as cur:
