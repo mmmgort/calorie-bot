@@ -185,6 +185,56 @@ async def meal_callback(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text("🗑 Отменено")
     await state.clear()
 
+# ===================== ОБРАБОТКА ФОТО ЕДЫ =====================
+
+@dp.message(F.photo)
+async def handle_photo(message: Message, state: FSMContext):
+    msg_wait = await message.answer("📸 Изучаю ваше блюдо... Секунду.")
+    
+    # Получаем самое качественное фото
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    file_path = file.file_path
+    
+    # Скачиваем файл в память
+    from io import BytesIO
+    photo_bytes = BytesIO()
+    await bot.download_file(file_path, photo_bytes)
+    
+    try:
+        # Промпт для анализа изображения
+        prompt = (
+            "Analyze this food photo. Estimate portion size and contents. "
+            "Return ONLY JSON: {\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"str\"}"
+        )
+        
+        # Отправляем фото в Gemini
+        # В google-genai для этого используется список [текст, байты]
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[prompt, photo_bytes.getvalue()]
+        )
+        
+        res_text = response.text
+        match = re.search(r'\{.*\}', res_text, re.DOTALL)
+        data = json.loads(match.group(0))
+        
+        await state.update_data(temp_meal=data)
+        
+        await msg_wait.edit_text(
+            f"🔍 Похоже на: *{data['name']}*\n"
+            f"📊 Оценка ИИ: ~{data['calories']} ккал\n"
+            f"Б: {data['protein']}г | Ж: {data['fat']}г | У: {data['carbs']}г\n\n"
+            "Записать в дневник?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Да", callback_data="meal_confirm"),
+                InlineKeyboardButton(text="🗑 Нет", callback_data="meal_cancel")
+            ]]), parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"Ошибка анализа фото: {e}")
+        await msg_wait.edit_text("❌ Не удалось распознать еду на фото. Попробуйте сфотографировать под другим углом.")
+
 async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
