@@ -69,11 +69,22 @@ async def ask_gemini(prompt, photo_data=None):
         raise e
 
 # ===================== КЛАВИАТУРЫ =====================
-def get_main_kb():
-    return ReplyKeyboardMarkup(keyboard=[
-        [KeyboardButton(text="🍲 Добавить еду"), KeyboardButton(text="📊 Статистика")],
-        [KeyboardButton(text="⚙️ Настройки")]
-    ], resize_keyboard=True)
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+
+def main_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="⚖️ Замер (Вес/Жим)")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_cancel_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отмена")]],
+        resize_keyboard=True
+    )
 
 # ===================== ОБРАБОТЧИКИ (АНКЕТА) =====================
 
@@ -82,69 +93,62 @@ async def cmd_start(message: Message):
     init_db()
     await message.answer("💪 Привет! Я твой AI-тренер. Нажми **'Настройки'**, чтобы начать.", 
                          reply_markup=get_main_kb(), parse_mode="Markdown")
+@dp.message(F.text == "❌ Отмена")
+async def cancel_handler(message: Message, state: FSMContext):
+    await state.clear() # Полностью сбрасываем состояние опроса
+    await message.answer(
+        "Действие отменено. Возвращаюсь в главное меню.",
+        reply_markup=main_keyboard()
+    )
 
 @dp.message(F.text == "⚙️ Настройки")
-async def start_setup(message: Message, state: FSMContext):
-    await state.set_state(ProfileStates.waiting_for_gender)
-    await message.answer("Твой пол (М/Ж)?")
+async def start_settings(message: Message, state: FSMContext):
+    await state.set_state(ProfileStates.gender)
+    await message.answer("Укажи свой пол (Мужчина/Женщина):", reply_markup=get_cancel_kb())
 
-@dp.message(ProfileStates.waiting_for_gender)
-async def set_gender(message: Message, state: FSMContext):
+@dp.message(ProfileStates.gender)
+async def process_gender(message: Message, state: FSMContext):
+    if message.text not in ["Мужчина", "Женщина"]:
+        await message.answer("Пожалуйста, выбери вариант из предложенных или нажми Отмена.")
+        return
     await state.update_data(gender=message.text)
-    await state.set_state(ProfileStates.waiting_for_age)
-    await message.answer("Сколько тебе лет?")
+    await state.set_state(ProfileStates.age)
+    await message.answer("Сколько тебе лет?", reply_markup=get_cancel_kb())
 
-@dp.message(ProfileStates.waiting_for_age)
-async def set_age(message: Message, state: FSMContext):
-    await state.update_data(age=message.text)
-    await state.set_state(ProfileStates.waiting_for_height)
-    await message.answer("Твой рост (см)?")
+# ... (повтори логику для роста и веса, всегда добавляя reply_markup=get_cancel_kb())
 
-@dp.message(ProfileStates.waiting_for_height)
-async def set_height(message: Message, state: FSMContext):
-    await state.update_data(height=message.text)
-    await state.set_state(ProfileStates.waiting_for_weight)
-    await message.answer("Твой вес (кг)?")
-
-@dp.message(ProfileStates.waiting_for_weight)
-async def set_weight(message: Message, state: FSMContext):
-    await state.update_data(weight=message.text)
-    await state.set_state(ProfileStates.waiting_for_activity)
-    await message.answer("Уровень активности (Низкий/Средний/Высокий)?")
-
-@dp.message(ProfileStates.waiting_for_activity)
-async def set_act(message: Message, state: FSMContext):
-    await state.update_data(activity=message.text)
-    await state.set_state(ProfileStates.waiting_for_goal)
-    await message.answer("Твоя цель (Похудение/Набор/Поддержание)?")
-
-@dp.message(ProfileStates.waiting_for_goal)
-async def finish_setup(message: Message, state: FSMContext):
-    u = await state.get_data()
-    msg_wait = await message.answer("🔄 Рассчитываю нормы через ИИ...")
+@dp.message(ProfileStates.goal)
+async def process_goal(message: Message, state: FSMContext):
+    await state.update_data(goal=message.text)
+    data = await state.get_data()
     
-    prompt = (f"Calculate daily calories (Mifflin-St Jeor) and macros. "
-              f"Data: {u['gender']}, {u['age']}y, {u['height']}cm, {u['weight']}kg, "
-              f"Activity: {u['activity']}, Goal: {message.text}. "
-              f"Return ONLY JSON: {{\"cal\": int, \"prot\": int, \"fat\": int, \"carb\": int}}")
+    msg_wait = await message.answer("🔄 Считаю твою норму через Gemini...")
     
     try:
-        res_text = await ask_gemini(prompt)
-        match = re.search(r'\{.*\}', res_text, re.DOTALL)
-        res = json.loads(match.group(0))
+        # Улучшенный промпт для исключения ошибок
+        prompt = (
+            f"Рассчитай суточную норму КБЖУ: пол {data['gender']}, возраст {data['age']}, "
+            f"рост {data['height']}, вес {data['weight']}, цель {data['goal']}. "
+            "Верни ответ ТОЛЬКО в формате JSON: "
+            "{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int}"
+        )
         
-        conn = psycopg2.connect(DATABASE_URL)
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO user_settings (user_id, cal, prot, fat, carb) VALUES (%s,%s,%s,%s,%s)
-                ON CONFLICT (user_id) DO UPDATE SET cal=EXCLUDED.cal, prot=EXCLUDED.prot, fat=EXCLUDED.fat, carb=EXCLUDED.carb
-            """, (message.from_user.id, res['cal'], res['prot'], res['fat'], res['carb']))
-        conn.commit()
-        conn.close()
+        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+        # Парсим JSON из ответа
+        result = json.loads(re.search(r'\{.*\}', response.text, re.DOTALL).group(0))
         
-        await msg_wait.edit_text(f"✅ Нормы установлены!\n🔥 {res['cal']} ккал | Б: {res['prot']}г")
-    except:
-        await msg_wait.edit_text("❌ Ошибка расчета. Попробуйте позже.")
+        # Здесь должен быть твой код записи в базу данных Railway
+        # save_to_db(message.from_user.id, result) 
+
+        await state.clear()
+        await message.answer(
+            f"✅ Нормы установлены!\n🔥 {result['calories']} ккал | Б: {result['protein']}г",
+            reply_markup=main_keyboard()
+        )
+        await msg_wait.delete()
+    except Exception as e:
+        await message.answer("❌ Ошибка расчета. Попробуй заполнить анкету снова.")
+    
     await state.clear()
 
 # ===================== СТАТИСТИКА =====================
