@@ -20,7 +20,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 genai.configure(api_key=GEMINI_API_KEY)
 
 # СТАВИМ 1.0-PRO - это решит проблему с 404 ошибкой в логах
-model = genai.GenerativeModel('gemini-1.0-pro')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
