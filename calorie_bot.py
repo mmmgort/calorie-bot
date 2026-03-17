@@ -55,19 +55,23 @@ def init_db():
 
 # ===================== ФУНКЦИЯ ВЫЗОВА ИИ (С ФОЛБЭКОМ) =====================
 async def ask_gemini(prompt):
-    """Пытается вызвать Gemini, перебирая доступные модели при ошибках."""
-    # Список моделей для проверки (от приоритетной к запасным)
-    models_to_try = ['gemini-1.5-flash', 'gemini-2.0-flash-exp', 'gemini-1.5-pro']
+    """Пытается вызвать Gemini, используя актуальные модели из логов."""
+    # Обновленный список на основе данных из 736.png
+    models_to_try = [
+        'gemini-2.5-flash', 
+        'gemini-2.5-pro', 
+        'gemini-2.0-flash'
+    ]
     
     last_error = ""
     for model_name in models_to_try:
         try:
-            print(f"🤖 Пробую модель: {model_name}...")
+            print(f"🤖 Пробую актуальную модель: {model_name}...")
             response = client.models.generate_content(model=model_name, contents=prompt)
             return response.text
         except Exception as e:
             last_error = str(e)
-            print(f"⚠️ Модель {model_name} недоступна: {last_error[:50]}...")
+            print(f"⚠️ Модель {model_name} ответила ошибкой: {last_error[:50]}...")
             continue
     
     # Если ни одна модель не сработала, выводим диагностику в логи
