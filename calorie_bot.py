@@ -10,7 +10,7 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKe
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-# Используем новую библиотеку, как просят логи
+# Используем НОВУЮ библиотеку
 from google import genai 
 
 # ===================== КОНФИГУРАЦИЯ =====================
@@ -18,7 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Инициализация нового клиента Gemini
+# Инициализация клиента Gemini (новый стандарт)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 bot = Bot(token=BOT_TOKEN)
@@ -37,6 +37,7 @@ def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         with conn.cursor() as cur:
+            # Тщательно проверяем отступы здесь (строка 42)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS user_settings (
                     user_id BIGINT PRIMARY KEY, 
@@ -56,11 +57,9 @@ def init_db():
                     meal_text TEXT, calories REAL, protein REAL, fat REAL, carbs REAL
                 )
             """)
-            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='progress' AND column_name='bench'")
-            if not cur.fetchone():
-                cur.execute("ALTER TABLE progress ADD COLUMN bench REAL DEFAULT 0.0")
         conn.commit()
         conn.close()
+        print("База данных инициализирована успешно")
     except Exception as e:
         print(f"Ошибка БД: {e}")
 
@@ -131,7 +130,7 @@ async def set_activity(message: Message, state: FSMContext):
 async def finish_setup(message: Message, state: FSMContext):
     u = await state.get_data()
     u['goal'] = message.text
-    msg_wait = await message.answer("🔄 Считаю КБЖУ через Gemini 1.5...", reply_markup=get_main_kb())
+    msg_wait = await message.answer("🔄 Считаю КБЖУ через Gemini...", reply_markup=get_main_kb())
     
     prompt = (f"Calculate daily calories (Mifflin-St Jeor) and macros. "
               f"Data: Gender: {u['gender']}, Age: {u['age']}, Height: {u['height']}, Weight: {u['weight']}, "
@@ -139,12 +138,12 @@ async def finish_setup(message: Message, state: FSMContext):
               f"Return ONLY JSON: {{\"cal\": int, \"prot\": int, \"fat\": int, \"carb\": int}}")
     
     try:
-        # Новый формат вызова API
+        # Новый вызов модели
         response = client.models.generate_content(model='gemini-1.5-flash', contents=prompt)
         res_text = response.text
         
         match = re.search(r'\{.*\}', res_text, re.DOTALL)
-        if not match: raise ValueError("JSON не найден в ответе")
+        if not match: raise ValueError("JSON не найден")
         
         res = json.loads(match.group(0))
         
@@ -163,9 +162,9 @@ async def finish_setup(message: Message, state: FSMContext):
             f"Б: {res['prot']}г | Ж: {res['fat']}г | У: {res['carb']}г"
         )
     except Exception as e:
-        # Урезаем текст ошибки, чтобы Telegram не ругался на длину
-        error_msg = str(e)[:100]
-        await msg_wait.answer(f"❌ Ошибка: {error_msg}. Попробуй еще раз.")
+        # Используем .answer вместо .edit_text для ошибок, чтобы избежать конфликтов Telegram
+        await message.answer(f"❌ Ошибка расчета. Проверь API ключ или попробуй позже.")
+        print(f"Ошибка Gemini: {e}")
     await state.clear()
 
 # ===================== СТАТИСТИКА И ЗАМЕРЫ =====================
@@ -204,7 +203,7 @@ async def handle_meal(message: Message, state: FSMContext):
     if message.text in ["🍲 Добавить еду", "⚖️ Замер (Вес/Жим)", "📊 Статистика", "⚙️ Настройки"] or message.text.startswith('/'):
         return
 
-    msg_wait = await message.answer("🔍 Анализирую состав...")
+    msg_wait = await message.answer("🔍 Анализирую...")
     try:
         prompt = f"Оцени КБЖУ еды: '{message.text}'. Верни ТОЛЬКО JSON: {{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"название\"}}"
         response = client.models.generate_content(model='gemini-1.5-flash', contents=prompt)
@@ -221,7 +220,7 @@ async def handle_meal(message: Message, state: FSMContext):
             ]]), parse_mode="Markdown"
         )
     except Exception as e:
-        await msg_wait.edit_text(f"❌ Не понял. Напиши проще, например: '2 яйца и кофе'.")
+        await msg_wait.edit_text(f"❌ Не удалось распознать еду. Попробуй описать иначе.")
 
 @dp.callback_query(F.data.startswith("meal_"))
 async def meal_callback(callback: CallbackQuery, state: FSMContext):
