@@ -19,7 +19,6 @@ from aiogram.exceptions import TelegramBadRequest
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from google import genai
 from google.genai import types
-from google.api_core import exceptions
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -192,15 +191,40 @@ async def process_goal(message: Message, state: FSMContext):
         conn.commit()
         conn.close()
 
-        await safe_delete(msg_wait) # Удаляем сообщение ожидания
+        await safe_delete(msg_wait)
         await message.answer(f"✅ Готово! Твоя норма: {res['calories']} ккал.", reply_markup=main_keyboard())
         await state.clear()
-    except exceptions.ResourceExhausted:
-        await msg_wait.edit_text("⏳ Лимит запросов ИИ. Подожди 30 сек и нажми цель снова.")
     except Exception as e:
-        await msg_wait.edit_text(f"❌ Ошибка: {e}")
+        if "429" in str(e):
+            await msg_wait.edit_text("⏳ Лимит запросов ИИ. Подожди 30 сек и нажми цель снова.")
+        else:
+            await msg_wait.edit_text(f"❌ Ошибка: {e}")
 
-# ===================== АНАЛИЗ ЕДЫ =====================
+# ===================== АНАЛИЗ ЕДЫ И СОВЕТЫ =====================
+
+async def get_recommendations(user_id):
+    """Генерирует советы, чем добрать норму"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute("SELECT cal FROM user_settings WHERE user_id = %s", (user_id,))
+            goal = cur.fetchone()
+            cur.execute("SELECT SUM(calories) FROM meals WHERE user_id = %s AND date = %s", (user_id, date.today()))
+            eaten = cur.fetchone()
+        conn.close()
+
+        if not goal or not eaten: return None
+        rem_c = goal[0] - (eaten[0] or 0)
+        
+        if rem_c > 200:
+            resp = client.models.generate_content(
+                model='gemini-2.5-flash', 
+                contents=f"У пользователя осталось {rem_c} ккал до конца дня. Посоветуй 3 варианта еды, чтобы закрыть норму."
+            )
+            return resp.text
+        return None
+    except:
+        return None
 
 async def get_gemini_analysis(parts):
     response = client.models.generate_content(
@@ -213,7 +237,6 @@ async def get_gemini_analysis(parts):
 
 @dp.message(F.photo | F.text)
 async def handle_meal(message: Message, state: FSMContext):
-    # Проверка, чтобы не перехватывать системные кнопки
     if message.text in ["📊 Статистика", "⚙️ Настройки", "⚖️ Замер (Вес)"] or (message.text and message.text.startswith('/')):
         return
 
@@ -246,8 +269,34 @@ async def handle_meal(message: Message, state: FSMContext):
             )
         else:
             await msg_wait.edit_text("❌ Не удалось распознать. Напиши состав текстом.")
-    except exceptions.ResourceExhausted:
-        await msg_wait.edit_text("⏳ Лимит запросов ИИ. Попробуй через минуту.")
+    except Exception as e:
+        if "429" in str(e):
+            await msg_wait.edit_text("⏳ Лимит запросов ИИ. Попробуй через минуту.")
+        else:
+            await msg_wait.edit_text("❌ Ошибка при анализе.")
+
+@dp.callback_query(F.data == "meal_confirm")
+async def meal_confirm_handler(callback: CallbackQuery, state: FSMContext):
+    user_data = await state.get_data()
+    d = user_data.get("temp_meal")
+    
+    if d:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO meals (user_id, date, meal_text, calories, protein, fat, carbs) VALUES (%s,%s,%s,%s,%s,%s,%s)", 
+                       (callback.from_user.id, date.today(), d['name'], d['calories'], d['protein'], d['fat'], d['carbs']))
+        conn.commit()
+        conn.close()
+        
+        await callback.message.edit_text(f"✅ Записано: {d['name']}")
+        
+        # ОТПРАВКА РЕКОМЕНДАЦИЙ
+        advice = await get_recommendations(callback.from_user.id)
+        if advice:
+            await callback.message.answer(f"💡 *Чем добить норму сегодня:*\n\n{advice}", parse_mode="Markdown")
+            
+    await state.clear()
+    await callback.answer()
 
 @dp.callback_query(F.data == "meal_edit")
 async def meal_edit_start(callback: CallbackQuery, state: FSMContext):
@@ -264,35 +313,27 @@ async def meal_edit_process(message: Message, state: FSMContext):
         parts.append(types.Part.from_bytes(data=user_data["last_photo"], mime_type="image/jpeg"))
     parts.append(f"Уточнение: {message.text}. Пересчитай этот JSON: {user_data.get('temp_meal')}")
 
-    new_data = await get_gemini_analysis(parts)
-    if new_data:
-        await state.update_data(temp_meal=new_data)
-        await msg_wait.delete()
-        await message.answer(
-            f"🍴 *{new_data['name']} (Обновлено)*\n🔥 {new_data['calories']} ккал | Б:{new_data['protein']}г\n\nЗаписать?",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Записать", callback_data="meal_confirm")],
-                [InlineKeyboardButton(text="✏️ Изменить снова", callback_data="meal_edit")]
-            ]), parse_mode="Markdown"
-        )
-    await state.set_state(None)
+    try:
+        new_data = await get_gemini_analysis(parts)
+        if new_data:
+            await state.update_data(temp_meal=new_data)
+            await safe_delete(msg_wait)
+            await message.answer(
+                f"🍴 *{new_data['name']} (Обновлено)*\n🔥 {new_data['calories']} ккал | Б:{new_data['protein']}г\n\nЗаписать?",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="✅ Записать", callback_data="meal_confirm")],
+                    [InlineKeyboardButton(text="✏️ Изменить снова", callback_data="meal_edit")]
+                ]), parse_mode="Markdown"
+            )
+        await state.set_state(None)
+    except Exception:
+        await msg_wait.edit_text("Ошибка пересчета.")
 
-@dp.callback_query(F.data.startswith("meal_"))
-async def meal_callback(callback: CallbackQuery, state: FSMContext):
-    if callback.data == "meal_confirm":
-        data = await state.get_data()
-        d = data.get("temp_meal")
-        if d:
-            conn = psycopg2.connect(DATABASE_URL)
-            with conn.cursor() as cur:
-                cur.execute("INSERT INTO meals (user_id, date, meal_text, calories, protein, fat, carbs) VALUES (%s,%s,%s,%s,%s,%s,%s)", 
-                           (callback.from_user.id, date.today(), d['name'], d['calories'], d['protein'], d['fat'], d['carbs']))
-            conn.commit()
-            conn.close()
-            await callback.message.edit_text(f"✅ Записано: {d['name']}")
-    else:
-        await safe_delete(callback.message)
+@dp.callback_query(F.data == "meal_cancel")
+async def meal_cancel_handler(callback: CallbackQuery, state: FSMContext):
+    await safe_delete(callback.message)
     await state.clear()
+    await callback.answer("Отменено")
 
 # ===================== ЗАПУСК =====================
 async def main():
