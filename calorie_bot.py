@@ -179,69 +179,68 @@ async def show_stats(message: Message):
 
 @dp.message(F.photo | F.text)
 async def handle_meal(message: Message, state: FSMContext):
-    # Игнорируем нажатия кнопок меню
     if message.text in ["🍲 Добавить еду", "📊 Статистика", "⚙️ Настройки"] or (message.text and message.text.startswith('/')):
         return
 
-    msg_wait = await message.answer("🔍 Анализирую...")
+    msg_wait = await message.answer("🔍 Эксперт изучает блюдо...")
     
     try:
         content_parts = []
+        user_comment = message.caption if message.caption else "Комментарий отсутствует"
         
-                if message.photo:
-            # Твой детализированный промпт + техническая надстройка
-            user_caption = message.caption if message.caption else ""
-            prompt = (
-                "Твоя роль: Ты — эксперт по нутрициологии и визуальному анализу пищи. "
-                f"Дополнительная информация от пользователя: {user_caption}. "
-                "Твоя задача — максимально точно определить калорийность и БЖУ блюда по фотографии. "
-                "🔍 Алгоритм действий: "
-                "1. Идентифицируй все ингредиенты. "
-                "2. Сопоставь размер порции с окружающими предметами для определения веса. "
-                "3. Учти скрытые калории (масло, соусы). "
-                "⚠️ ВАЖНО: Результат выдай СТРОГО в формате JSON на русском языке: "
-                "{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"название\", \"verdict\": \"твой краткий совет\"}"
+        if message.photo:
+            file = await bot.get_file(message.photo[-1].file_id)
+            p_io = BytesIO()
+            await bot.download_file(file.file_path, p_io)
+            
+            image_part = types.Part.from_bytes(
+                data=p_io.getvalue(),
+                mime_type="image/jpeg"
             )
             content_parts.append(image_part)
-            content_parts.append(prompt)
             
-            # 3. Добавляем текстовый промпт для фото
-            prompt = "Analyze this food photo. Return ONLY JSON: {\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"str\"}"
+            # Твой профессиональный промпт
+            prompt = (
+                "Ты — эксперт по нутрициологии и визуальному анализу пищи. "
+                f"Дополнительная информация от пользователя: {user_comment}. "
+                "Твоя задача — максимально точно определить калорийность и БЖУ по фотографии. "
+                "Алгоритм: 1. Идентифицируй ингредиенты. 2. Сопоставь размер порции с приборами. "
+                "3. Учти скрытые калории. 4. Сделай краткий вердикт. "
+                "Верни ТОЛЬКО JSON на русском: "
+                "{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"название\", \"verdict\": \"совет\"}"
+            )
+            content_parts.append(prompt)
         else:
-            # Если прислали текст, а не фото
-            prompt = f"Analyze: '{message.text}'. Return ONLY JSON: {{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"str\"}}"
+            prompt = (
+                f"Проанализируй текст: '{message.text}'. "
+                "Верни ТОЛЬКО JSON на русском: "
+                "{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"название\", \"verdict\": \"совет\"}"
+            )
+            content_parts.append(prompt)
 
-        content_parts.append(prompt)
-
-        # 4. Отправляем запрос в Gemini 2.5 Flash
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=content_parts
         )
         
-        res_text = response.text
-        match = re.search(r'\{.*\}', res_text, re.DOTALL)
-        data = json.loads(match.group(0))
-        
-        # Сохраняем результат временно, чтобы записать в БД после нажатия "Да"
+        data = json.loads(re.search(r'\{.*\}', response.text, re.DOTALL).group(0))
         await state.update_data(temp_meal=data)
         
-        # Удаляем "Анализирую..." и выводим результат
         await msg_wait.delete()
-                await message.answer(
+        
+        await message.answer(
             f"🍴 *{data['name']}*\n"
             f"🔥 {data['calories']} ккал | Б: {data['protein']}г | Ж: {data['fat']}г | У: {data['carbs']}г\n\n"
-            f"💡 *Совет:* {data.get('verdict', 'Приятного аппетита!')}\n\n"
+            f"💡 *Вердикт:* {data.get('verdict', 'Приятного аппетита!')}\n\n"
             "Записать в дневник?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да", callback_data="meal_confirm"),
                 InlineKeyboardButton(text="🗑 Нет", callback_data="meal_cancel")
             ]]), parse_mode="Markdown"
-                )
-        
+        )
     except Exception as e:
-        print(f"Ошибка при анализе: {e}")
-        await msg_wait.edit_text("❌ Ошибка ИИ. Попробуй описать еду текстом.")
+        print(f"Ошибка: {e}")
+        await msg_wait.edit_text("❌ Ошибка при анализе. Попробуй еще раз.")
 
 @dp.callback_query(F.data.startswith("meal_"))
 async def meal_callback(callback: CallbackQuery, state: FSMContext):
