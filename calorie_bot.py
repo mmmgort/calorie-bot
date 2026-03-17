@@ -188,18 +188,22 @@ async def handle_meal(message: Message, state: FSMContext):
     try:
         content_parts = []
         
-        if message.photo:
-            # 1. Получаем файл через API Телеграма
-            file = await bot.get_file(message.photo[-1].file_id)
-            p_io = BytesIO()
-            await bot.download_file(file.file_path, p_io)
-            
-            # 2. Упаковываем фото правильно (исправляет ошибку из лога 741.png)
-            image_part = types.Part.from_bytes(
-                data=p_io.getvalue(),
-                mime_type="image/jpeg"
+                if message.photo:
+            # Твой детализированный промпт + техническая надстройка
+            user_caption = message.caption if message.caption else ""
+            prompt = (
+                "Твоя роль: Ты — эксперт по нутрициологии и визуальному анализу пищи. "
+                f"Дополнительная информация от пользователя: {user_caption}. "
+                "Твоя задача — максимально точно определить калорийность и БЖУ блюда по фотографии. "
+                "🔍 Алгоритм действий: "
+                "1. Идентифицируй все ингредиенты. "
+                "2. Сопоставь размер порции с окружающими предметами для определения веса. "
+                "3. Учти скрытые калории (масло, соусы). "
+                "⚠️ ВАЖНО: Результат выдай СТРОГО в формате JSON на русском языке: "
+                "{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"название\", \"verdict\": \"твой краткий совет\"}"
             )
             content_parts.append(image_part)
+            content_parts.append(prompt)
             
             # 3. Добавляем текстовый промпт для фото
             prompt = "Analyze this food photo. Return ONLY JSON: {\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"str\"}"
@@ -224,13 +228,17 @@ async def handle_meal(message: Message, state: FSMContext):
         
         # Удаляем "Анализирую..." и выводим результат
         await msg_wait.delete()
-        await message.answer(
-            f"🍴 *{data['name']}*\n🔥 {data['calories']} ккал | Б: {data['protein']}г\nЗаписать в дневник?",
+                await message.answer(
+            f"🍴 *{data['name']}*\n"
+            f"🔥 {data['calories']} ккал | Б: {data['protein']}г | Ж: {data['fat']}г | У: {data['carbs']}г\n\n"
+            f"💡 *Совет:* {data.get('verdict', 'Приятного аппетита!')}\n\n"
+            "Записать в дневник?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да", callback_data="meal_confirm"),
                 InlineKeyboardButton(text="🗑 Нет", callback_data="meal_cancel")
             ]]), parse_mode="Markdown"
-        )
+                )
+        
     except Exception as e:
         print(f"Ошибка при анализе: {e}")
         await msg_wait.edit_text("❌ Ошибка ИИ. Попробуй описать еду текстом.")
