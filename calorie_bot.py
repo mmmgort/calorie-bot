@@ -11,7 +11,8 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKe
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from google import genai 
+from google import genai
+from google.genai import types
 
 # ===================== КОНФИГУРАЦИЯ =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -178,36 +179,61 @@ async def show_stats(message: Message):
 
 @dp.message(F.photo | F.text)
 async def handle_meal(message: Message, state: FSMContext):
+    # Игнорируем нажатия кнопок меню
     if message.text in ["🍲 Добавить еду", "📊 Статистика", "⚙️ Настройки"] or (message.text and message.text.startswith('/')):
         return
 
     msg_wait = await message.answer("🔍 Анализирую...")
     
     try:
-        photo_bytes = None
+        content_parts = []
+        
         if message.photo:
+            # 1. Получаем файл через API Телеграма
             file = await bot.get_file(message.photo[-1].file_id)
             p_io = BytesIO()
             await bot.download_file(file.file_path, p_io)
-            photo_bytes = p_io.getvalue()
-            prompt = "Analyze photo. Return ONLY JSON: {\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"str\"}"
+            
+            # 2. Упаковываем фото правильно (исправляет ошибку из лога 741.png)
+            image_part = types.Part.from_bytes(
+                data=p_io.getvalue(),
+                mime_type="image/jpeg"
+            )
+            content_parts.append(image_part)
+            
+            # 3. Добавляем текстовый промпт для фото
+            prompt = "Analyze this food photo. Return ONLY JSON: {\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"str\"}"
         else:
+            # Если прислали текст, а не фото
             prompt = f"Analyze: '{message.text}'. Return ONLY JSON: {{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"str\"}}"
 
-        res_text = await ask_gemini(prompt, photo_bytes)
+        content_parts.append(prompt)
+
+        # 4. Отправляем запрос в Gemini 2.5 Flash
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=content_parts
+        )
+        
+        res_text = response.text
         match = re.search(r'\{.*\}', res_text, re.DOTALL)
         data = json.loads(match.group(0))
+        
+        # Сохраняем результат временно, чтобы записать в БД после нажатия "Да"
         await state.update_data(temp_meal=data)
         
-        await msg_wait.edit_text(
-            f"🍴 *{data['name']}*\n🔥 {data['calories']} ккал | Б: {data['protein']}г\nЗаписать?",
+        # Удаляем "Анализирую..." и выводим результат
+        await msg_wait.delete()
+        await message.answer(
+            f"🍴 *{data['name']}*\n🔥 {data['calories']} ккал | Б: {data['protein']}г\nЗаписать в дневник?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да", callback_data="meal_confirm"),
                 InlineKeyboardButton(text="🗑 Нет", callback_data="meal_cancel")
             ]]), parse_mode="Markdown"
         )
-    except:
-        await msg_wait.edit_text("❌ Не удалось распознать. Попробуйте описать текстом.")
+    except Exception as e:
+        print(f"Ошибка при анализе: {e}")
+        await msg_wait.edit_text("❌ Ошибка ИИ. Попробуй описать еду текстом.")
 
 @dp.callback_query(F.data.startswith("meal_"))
 async def meal_callback(callback: CallbackQuery, state: FSMContext):
