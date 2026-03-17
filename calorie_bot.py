@@ -18,7 +18,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+
+# СТАВИМ 1.0-PRO - это решит проблему с 404 ошибкой в логах
+model = genai.GenerativeModel('gemini-1.0-pro')
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -39,30 +41,30 @@ def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         with conn.cursor() as cur:
-       cur.execute("""
-            CREATE TABLE IF NOT EXISTS user_settings (
-                user_id BIGINT PRIMARY KEY, 
-                cal INT DEFAULT 2000, prot INT DEFAULT 150, 
-                fat INT DEFAULT 70, carb INT DEFAULT 200
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS progress (
-                id SERIAL PRIMARY KEY, user_id BIGINT, date DATE, 
-                weight REAL, waist REAL, bench REAL DEFAULT 0.0
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS meals (
-                id SERIAL PRIMARY KEY, user_id BIGINT, date DATE, 
-                meal_text TEXT, calories REAL, protein REAL, fat REAL, carbs REAL
-            )
-        """)
-        # Проверка и добавление колонки bench на случай старой версии базы
-        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='progress' AND column_name='bench'")
-        if not cur.fetchone():
-            cur.execute("ALTER TABLE progress ADD COLUMN bench REAL DEFAULT 0.0")
-    conn.commit()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id BIGINT PRIMARY KEY, 
+                    cal INT DEFAULT 2000, prot INT DEFAULT 150, 
+                    fat INT DEFAULT 70, carb INT DEFAULT 200
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS progress (
+                    id SERIAL PRIMARY KEY, user_id BIGINT, date DATE, 
+                    weight REAL, waist REAL, bench REAL DEFAULT 0.0
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS meals (
+                    id SERIAL PRIMARY KEY, user_id BIGINT, date DATE, 
+                    meal_text TEXT, calories REAL, protein REAL, fat REAL, carbs REAL
+                )
+            """)
+            # Проверка и добавление колонки bench на случай старой версии базы
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='progress' AND column_name='bench'")
+            if not cur.fetchone():
+                cur.execute("ALTER TABLE progress ADD COLUMN bench REAL DEFAULT 0.0")
+        conn.commit()
         conn.close()
         print("База данных инициализирована успешно")
     except Exception as e:
@@ -209,11 +211,16 @@ async def handle_meal(message: Message, state: FSMContext):
     msg_wait = await message.answer("🔍 Анализирую...")
     try:
         contents = ["Оцени КБЖУ еды. Верни ТОЛЬКО JSON: {\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"название\"}"]
-        if message.text: contents.append(message.text)
-        if message.photo:
-            file = await bot.get_file(message.photo[-1].file_id)
-            img = await bot.download_file(file.file_path)
-            contents.append({"mime_type": "image/jpeg", "data": img.read()})
+        
+        # Модель 1.0-pro может не принять фото, поэтому используем только текст.
+        # Если юзер скинул фото + текст (caption), берем текст.
+        if message.text: 
+            contents.append(message.text)
+        elif message.caption:
+            contents.append(message.caption)
+        else:
+            await msg_wait.edit_text("❌ Пожалуйста, напиши текстом, что ты съел (модель пока не поддерживает фото).")
+            return
             
         response = model.generate_content(contents)
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
@@ -230,7 +237,7 @@ async def handle_meal(message: Message, state: FSMContext):
             ]]), parse_mode="Markdown"
         )
     except:
-        await msg_wait.edit_text("❌ Не удалось распознать. Опиши еду текстом.")
+        await msg_wait.edit_text("❌ Не удалось распознать. Опиши еду текстом понятнее (например: '100г гречки и 2 яйца').")
 
 @dp.callback_query(F.data.startswith("meal_"))
 async def meal_callback(callback: CallbackQuery, state: FSMContext):
