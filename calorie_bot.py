@@ -23,12 +23,10 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# СИСТЕМНАЯ ИНСТРУКЦИЯ (Для максимальной точности фото)
+# СИСТЕМНАЯ ИНСТРУКЦИЯ
 SYSTEM_INSTRUCTION = (
-    "Ты — эксперт-нутрициолог. Твоя задача: анализировать фото еды или текст и выдавать КБЖУ. "
-    "1. Оценивай порцию по предметам на фото (ложки, вилки). "
-    "2. Учитывай скрытые жиры и соусы. "
-    "3. Ответ должен быть СТРОГО в формате JSON на русском языке: "
+    "Ты — эксперт-нутрициолог. Анализируй фото или текст. "
+    "Ответ СТРОГО в JSON на русском: "
     "{\"calories\": int, \"protein\": int, \"fat\": int, \"carbs\": int, \"name\": \"название\", \"verdict\": \"совет\"}"
 )
 
@@ -83,18 +81,18 @@ def get_cancel_kb():
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     init_db()
-    await message.answer("💪 Привет! Я твой AI-тренер. Нажми **'Настройки'**, чтобы начать.", 
+    await message.answer("💪 Бот готов! Нажми **'Настройки'**.", 
                          reply_markup=main_keyboard(), parse_mode="Markdown")
 
 @dp.message(F.text == "❌ Отмена")
 async def cancel_handler(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("Действие отменено.", reply_markup=main_keyboard())
+    await message.answer("Отменено.", reply_markup=main_keyboard())
 
 @dp.message(F.text == "⚙️ Настройки")
 async def start_settings(message: Message, state: FSMContext):
     await state.set_state(ProfileStates.gender)
-    await message.answer("Укажи свой пол (Мужчина/Женщина):", reply_markup=get_cancel_kb())
+    await message.answer("Твой пол (М/Ж)?", reply_markup=get_cancel_kb())
 
 @dp.message(ProfileStates.gender)
 async def process_gender(message: Message, state: FSMContext):
@@ -130,19 +128,15 @@ async def process_activity(message: Message, state: FSMContext):
 async def process_goal(message: Message, state: FSMContext):
     await state.update_data(goal=message.text)
     data = await state.get_data()
-    msg_wait = await message.answer("🔄 Считаю твою норму...")
+    msg_wait = await message.answer("🔄 Считаю...")
     
     try:
-        prompt = (f"Рассчитай КБЖУ: пол {data['gender']}, возраст {data['age']}, "
-                  f"рост {data['height']}, вес {data['weight']}, цель {data['goal']}.")
-        
+        prompt = f"Рассчитай КБЖУ: пол {data['gender']}, возраст {data['age']}, рост {data['height']}, вес {data['weight']}, активность {data['activity']}, цель {data['goal']}."
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-1.5-flash', # Используем 1.5 для больших лимитов
             contents=prompt,
-            config=types.GenerateContentConfig(system_instruction="Выдай только JSON: calories, protein, fat, carbs")
+            config=types.GenerateContentConfig(system_instruction="Return ONLY JSON.")
         )
-        
-        # Исправленный расчет
         result = json.loads(re.search(r'\{.*\}', response.text, re.DOTALL).group(0))
         
         conn = psycopg2.connect(DATABASE_URL)
@@ -156,9 +150,12 @@ async def process_goal(message: Message, state: FSMContext):
 
         await state.clear()
         await msg_wait.delete()
-        await message.answer(f"✅ Нормы установлены! Цель: {result['calories']} ккал", reply_markup=main_keyboard())
+        await message.answer(f"✅ Готово! Норма: {result['calories']} ккал.", reply_markup=main_keyboard())
     except Exception as e:
-        await message.answer(f"❌ Ошибка расчета: {e}")
+        if "429" in str(e):
+            await message.answer("⏳ Лимит запросов ИИ исчерпан. Подожди 1 минуту.")
+        else:
+            await message.answer(f" Ошибка: {e}")
 
 # ===================== АНАЛИЗ ЕДЫ =====================
 
@@ -167,50 +164,43 @@ async def handle_meal(message: Message, state: FSMContext):
     if message.text in ["📊 Статистика", "⚙️ Настройки", "⚖️ Замер (Вес/Жим)"] or (message.text and message.text.startswith('/')):
         return
 
-    msg_wait = await message.answer("🔍 Изучаю блюдо...")
+    msg_wait = await message.answer("🔍 Анализ...")
     
     try:
         content_parts = []
         if message.photo:
-            # Скачиваем фото в буфер
             file_id = message.photo[-1].file_id
             file = await bot.get_file(file_id)
             buffer = BytesIO()
             await bot.download_file(file.file_path, buffer)
-            
-            image_part = types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg")
-            content_parts.append(image_part)
-            content_parts.append(f"Проанализируй фото. Комментарий: {message.caption or 'нет'}")
+            content_parts.append(types.Part.from_bytes(data=buffer.getvalue(), mime_type="image/jpeg"))
+            content_parts.append(f"Еда. Описание: {message.caption or 'нет'}")
         else:
-            content_parts.append(f"Проанализируй текст: {message.text}")
+            content_parts.append(f"Еда: {message.text}")
 
-        # Вызов новейшей модели Gemini 2.0
         response = client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-1.5-flash', 
             contents=content_parts,
             config=types.GenerateContentConfig(system_instruction=SYSTEM_INSTRUCTION, temperature=0.1)
         )
         
-        # Надежный парсинг JSON
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        if not match:
-            raise ValueError("ИИ не вернул JSON")
-            
         data = json.loads(match.group(0))
         await state.update_data(temp_meal=data)
         
         await msg_wait.delete()
         await message.answer(
-            f"🍴 *{data['name']}*\n🔥 {data['calories']} ккал | Б:{data['protein']} Ж:{data['fat']} У:{data['carbs']}\n"
-            f"💡 {data.get('verdict', 'Приятного аппетита!')}\n\nЗаписать?",
+            f"🍴 *{data['name']}*\n🔥 {data['calories']} ккал | Б:{data['protein']}г\n\nЗаписать?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Да", callback_data="meal_confirm"),
                 InlineKeyboardButton(text="🗑 Нет", callback_data="meal_cancel")
             ]]), parse_mode="Markdown"
         )
     except Exception as e:
-        print(f"Ошибка анализа: {e}")
-        await msg_wait.edit_text("❌ Не удалось распознать фото. Опиши еду текстом.")
+        if "429" in str(e):
+            await msg_wait.edit_text("⏳ Подожди немного, ИИ отдыхает (лимит запросов).")
+        else:
+            await msg_wait.edit_text("❌ Опиши еду текстом.")
 
 @dp.callback_query(F.data.startswith("meal_"))
 async def meal_callback(callback: CallbackQuery, state: FSMContext):
@@ -241,13 +231,13 @@ async def show_stats(message: Message):
     conn.close()
 
     if not goal:
-        await message.answer("Сначала пройди '⚙️ Настройки'!")
+        await message.answer("Сначала настрой профиль!")
         return
 
     c, p, f, cr = [int(x or 0) for x in eaten]
     await message.answer(
         f"📅 *Сегодня ({date.today()}):*\n\n"
-        f"🔥 Ккал: {c} / {goal[0]}\n🍗 Б: {p}/{goal[1]}г | 🥑 Ж: {f}/{goal[2]}г | 🍞 У: {cr}/{goal[3]}г",
+        f"🔥 Калории: {c} / {goal[0]}\n🍗 Белки: {p}/{goal[1]}г\n🥑 Жиры: {f}/{goal[2]}г\n🍞 Углеводы: {cr}/{goal[3]}г",
         parse_mode="Markdown"
     )
 
@@ -258,3 +248,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
