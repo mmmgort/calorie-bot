@@ -36,9 +36,10 @@ class MealStates(StatesGroup):
 
 # ===================== БАЗА ДАННЫХ =====================
 def init_db():
-    conn = psycopg2.connect(DATABASE_URL)
-    with conn.cursor() as cur:
-        cur.execute("""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+       cur.execute("""
             CREATE TABLE IF NOT EXISTS user_settings (
                 user_id BIGINT PRIMARY KEY, 
                 cal INT DEFAULT 2000, prot INT DEFAULT 150, 
@@ -62,7 +63,10 @@ def init_db():
         if not cur.fetchone():
             cur.execute("ALTER TABLE progress ADD COLUMN bench REAL DEFAULT 0.0")
     conn.commit()
-    conn.close()
+        conn.close()
+        print("База данных инициализирована успешно")
+    except Exception as e:
+        print(f"Ошибка инициализации базы: {e}")
 
 # ===================== КЛАВИАТУРЫ =====================
 def get_main_kb():
